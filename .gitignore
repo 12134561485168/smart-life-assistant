@@ -1,0 +1,66 @@
+# ================= Python =================
+# 字节码缓存
+__pycache__/
+*.py[cod]
+*$py.class
+# 包构建产物
+*.egg-info/
+.eggs/
+build/
+dist/
+# 虚拟环境
+.venv/
+venv/
+env/
+# 工具缓存
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ============ 环境变量与密钥（切勿提交） ============
+# 任意层级的 .env（如 backend/.env、tool/.env）都会被忽略
+.env
+.env.*
+# 但允许提交 .env.example 作为配置模板
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ============ 运行时缓存与数据库 ============
+.cache
+.cache.sqlite
+*.sqlite
+*.db
+*.log
+
+# ============ Node / 前端 ============
+node_modules/
+dist/
+*.local
+npm-debug.log*
+
+# ============ IDE / 系统 ============
+.vscode/
+.idea/
+.vs/
+.DS_Store
+Thumbs.db
+
+# ============ 本地启动脚本（含本机路径，不入库） ============
+start.bat
+
+# ============ 根目录临时 / 调试脚本（非项目正式代码） ============
+/1.py
+/1.txt
+/api.py
+/main.py
+
+# ============ 敏感配置：显式声明，防止漏配导致泄露 ============
+# 后端密钥 / MCP 真实端点（含 API Key 的 mcp.json）
+/backend/.env
+/tool/.env
+/backend/mcp.json

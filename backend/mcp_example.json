@@ -1,0 +1,36 @@
+{
+  "weather": {
+      "weather": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "transport": "streamable-http"
+    },
+    "air": {
+      "url": "http://www.showapi.com.cn/mcp/104/{key}",
+      "transport": "streamable-http"
+    }
+  },
+  "food": {
+    "howtocook": {
+      "url": "https://mcpmarket.cn/mcp/{key}",
+      "transport": "streamable-http"
+    },
+    "meal": {
+      "url": "http://127.0.0.1:8002/mcp",
+      "transport": "streamable-http"
+    }
+  },
+  "travel": {
+    "12306":{
+      "url":"https://mcpmarket.cn/mcp/{key}",
+      "transport":"streamable-http"
+    },
+    "amp":{
+      "url":"https://mcpmarket.cn/mcp/{key}",
+      "transport":"streamable-http"
+    },
+    "airplane":{
+      "url":"https://mcpmarket.cn/mcp/{key}",
+      "transport":"streamable-http"
+    }
+  }
+}

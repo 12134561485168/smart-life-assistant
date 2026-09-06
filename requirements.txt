@@ -1,0 +1,37 @@
+# 万象 · 生活智能助手 —— Python 依赖清单
+# 安装：pip install -r requirements.txt
+
+# ---- Web 框架 ----
+fastapi>=0.140
+uvicorn>=0.30
+python-dotenv>=1.0
+pydantic>=2.7
+
+# ---- LangChain / LangGraph 主控 ----
+langchain>=1.0
+langchain-core>=1.0
+langchain-community>=0.4
+langchain-openai>=1.6
+langchain-ollama>=1.1
+langchain-text-splitters>=1.1
+langchain-mcp-adapters>=0.3
+langgraph>=1.2
+langgraph-checkpoint-redis>=0.5
+mcp>=1.29
+typing_extensions>=4.9        # agent.py / 子代理 类型标注
+
+# ---- 存储：Redis（检查点 / 会话密钥 / 撤销标记 / 向量库） ----
+redis>=5.0
+langchain-redis>=0.2
+
+# ---- RAG 文档解析 / 文本处理 ----
+pymupdf>=1.24
+beautifulsoup4>=4.12     # agent.py 输入清洗（HTML 标签剔除）
+
+# ---- 本地 MCP 工具服务器（tool/） ----
+openmeteo-requests>=1.7
+openmeteo-sdk>=1.28
+pandas>=2.0
+requests-cache>=1.1
+retry-requests>=2.0
+httpx>=0.27

@@ -1,0 +1,365 @@
+openapi: 3.1.0
+info:
+  title: TheMealDB API
+  version: "1.0"
+  description: >-
+    Search and browse TheMealDB's crowd-sourced meals, recipes, cuisines,
+    categories, and ingredient data. Access level and result limits depend on
+    the supplied API key. Obtain access and review current terms on the official
+    documentation page. API keys are deliberately not included in this
+    specification.
+  termsOfService: https://www.themealdb.com/terms_of_use.php
+  contact:
+    name: TheMealDB
+    url: https://www.themealdb.com/contact.php
+    email: thedatadb@gmail.com
+  license:
+    name: TheMealDB Terms of Use
+    url: https://www.themealdb.com/terms_of_use.php
+externalDocs:
+  description: Official API documentation
+  url: https://www.themealdb.com/documentation
+servers:
+  - url: https://www.themealdb.com/api/json/v1
+    description: Stable V1 API
+tags:
+  - name: Search
+  - name: Lookup
+  - name: Filter
+  - name: Lists
+  - name: Discovery
+paths:
+  /{apiKey}/search.php:
+    get:
+      tags: [Search]
+      summary: Search for meals
+      description: >-
+        Supply exactly one search parameter. Use `s` for a full or partial
+        meal-name search, or `f` for meals beginning with one letter.
+      operationId: searchV1
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+        - $ref: "#/components/parameters/MealName"
+        - $ref: "#/components/parameters/FirstLetter"
+      responses:
+        "200":
+          description: Matching meal records
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MealsResponse"
+  /{apiKey}/lookup.php:
+    get:
+      tags: [Lookup]
+      summary: Look up a meal by ID
+      operationId: lookupV1
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+        - $ref: "#/components/parameters/MealId"
+      responses:
+        "200":
+          description: Full meal record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MealsResponse"
+  /{apiKey}/filter.php:
+    get:
+      tags: [Filter]
+      summary: Filter meals
+      description: >-
+        Supply exactly one filter: ingredient (`i`), category (`c`), or
+        area/cuisine (`a`). Multiple comma-separated ingredients require supported access.
+      operationId: filterV1
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+        - $ref: "#/components/parameters/FilterIngredient"
+        - $ref: "#/components/parameters/Category"
+        - $ref: "#/components/parameters/Area"
+      responses:
+        "200":
+          description: Matching meal summaries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MealSummariesResponse"
+  /{apiKey}/list.php:
+    get:
+      tags: [Lists]
+      summary: List filter values
+      description: >-
+        Supply exactly one parameter with the literal value `list`: `c` for
+        categories, `a` for areas, or `i` for ingredients.
+      operationId: listFiltersV1
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+        - $ref: "#/components/parameters/ListCategories"
+        - $ref: "#/components/parameters/ListAreas"
+        - $ref: "#/components/parameters/ListIngredients"
+      responses:
+        "200":
+          description: Available filter values or ingredient records
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListResponse"
+  /{apiKey}/categories.php:
+    get:
+      tags: [Lists]
+      summary: List detailed meal categories
+      operationId: categoriesV1
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+      responses:
+        "200":
+          description: Category records
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoriesResponse"
+  /{apiKey}/random.php:
+    get:
+      tags: [Discovery]
+      summary: Get one random meal
+      operationId: randomMealV1
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+      responses:
+        "200":
+          $ref: "#/components/responses/Meals"
+  /{apiKey}/randomselection.php:
+    get:
+      tags: [Discovery]
+      summary: Get a random meal selection
+      description: Selection size depends on the API access level.
+      operationId: randomSelectionV1
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+      responses:
+        "200":
+          $ref: "#/components/responses/Meals"
+  /{apiKey}/latest.php:
+    get:
+      tags: [Discovery]
+      summary: Get the latest meals
+      description: Availability and result count depend on the API access level.
+      operationId: latestMealsV1
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+      responses:
+        "200":
+          $ref: "#/components/responses/Meals"
+components:
+  parameters:
+    ApiKey:
+      name: apiKey
+      in: path
+      required: true
+      description: Your TheMealDB API key. No key value is stored in this specification.
+      schema:
+        type: string
+        minLength: 1
+    MealName:
+      name: s
+      in: query
+      required: false
+      description: Full or partial meal name.
+      schema:
+        type: string
+        minLength: 1
+    FirstLetter:
+      name: f
+      in: query
+      required: false
+      description: First letter of a meal name.
+      schema:
+        type: string
+        pattern: "^[A-Za-z]$"
+    MealId:
+      name: i
+      in: query
+      required: true
+      description: Numeric meal ID.
+      schema:
+        type: integer
+        minimum: 1
+    FilterIngredient:
+      name: i
+      in: query
+      required: false
+      description: Ingredient name.
+      schema:
+        type: string
+        minLength: 1
+    Category:
+      name: c
+      in: query
+      required: false
+      description: Category name. Spaces may be represented by underscores.
+      schema:
+        type: string
+        minLength: 1
+    Area:
+      name: a
+      in: query
+      required: false
+      description: Area or cuisine name. Spaces may be represented by underscores.
+      schema:
+        type: string
+        minLength: 1
+    ListCategories:
+      name: c
+      in: query
+      required: false
+      schema:
+        type: string
+        const: list
+    ListAreas:
+      name: a
+      in: query
+      required: false
+      schema:
+        type: string
+        const: list
+    ListIngredients:
+      name: i
+      in: query
+      required: false
+      schema:
+        type: string
+        const: list
+  responses:
+    Meals:
+      description: Meal records
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MealsResponse"
+  schemas:
+    MealsResponse:
+      type: object
+      required: [meals]
+      properties:
+        meals:
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/Meal"
+            - type: object
+              description: Legacy access-level message.
+              additionalProperties: true
+            - type: string
+              description: Legacy no-data or access-level message.
+            - type: "null"
+    MealSummariesResponse:
+      type: object
+      required: [meals]
+      properties:
+        meals:
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/MealSummary"
+            - type: string
+              description: Legacy no-data message.
+            - type: "null"
+    ListResponse:
+      type: object
+      required: [meals]
+      properties:
+        meals:
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/ListValue"
+            - type: "null"
+    CategoriesResponse:
+      type: object
+      required: [categories]
+      properties:
+        categories:
+          type: array
+          items:
+            $ref: "#/components/schemas/CategoryRecord"
+    MealSummary:
+      type: object
+      required: [idMeal, strMeal]
+      properties:
+        idMeal:
+          oneOf:
+            - type: integer
+            - type: string
+          description: Numeric meal identifier.
+        strMeal:
+          type: string
+        strMealThumb:
+          type: [string, "null"]
+          format: uri
+        strArea:
+          type: [string, "null"]
+        strCountry:
+          type: [string, "null"]
+    Meal:
+      allOf:
+        - $ref: "#/components/schemas/MealSummary"
+        - type: object
+          properties:
+            strMealAlternate:
+              type: [string, "null"]
+            strTags:
+              type: [string, "null"]
+            strCategory:
+              type: [string, "null"]
+            strInstructions:
+              type: [string, "null"]
+            strYoutube:
+              type: [string, "null"]
+            strSource:
+              type: [string, "null"]
+            strImageSource:
+              type: [string, "null"]
+            strCreativeCommonsConfirmed:
+              type: [string, "null"]
+            dateModified:
+              type: [string, "null"]
+              description: Database timestamp in `YYYY-MM-DD HH:MM:SS` format.
+          patternProperties:
+            "^strIngredient([1-9]|1[0-9]|20)$":
+              type: [string, "null"]
+            "^strMeasure([1-9]|1[0-9]|20)$":
+              type: [string, "null"]
+    Ingredient:
+      type: object
+      properties:
+        idIngredient:
+          oneOf:
+            - type: integer
+            - type: string
+        strIngredient:
+          type: [string, "null"]
+        strDescription:
+          type: [string, "null"]
+        strThumb:
+          type: [string, "null"]
+        strType:
+          type: [string, "null"]
+    CategoryRecord:
+      type: object
+      properties:
+        idCategory:
+          oneOf:
+            - type: integer
+            - type: string
+        strCategory:
+          type: [string, "null"]
+        strCategoryThumb:
+          type: [string, "null"]
+        strCategoryDescription:
+          type: [string, "null"]
+    ListValue:
+      type: object
+      description: >-
+        Contains an area, category, or full ingredient record according to the
+        requested list.
+      additionalProperties: true
+
