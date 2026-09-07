@@ -190,11 +190,19 @@ SUMMARY_KEEP_RECENT = '5'           # 摘要压缩时强制保留最近 N 条原
 MAX_ERROR = '3'                     # 子任务失败回 plan 重规划的最多次数
 MAX_INTERRUPT = '3'                 # 缺数据请教（interrupt）的最多次数
 MAX_FEEDBACK = '2'                  # 汇总验收不过回 plan 重规划的最多次数（达上限自动放行）
+```
 
-# 本地工具（tool/）
-amap_key = ''            # 高德 Web 服务 Key（天气地理编码）
-food_port = '8002'       # 与 backend/mcp.json 的 meal 端点一致
-THEMEALDB_API_KEY = '1'
+tool/ 下的本地 MCP 工具服务器使用独立的环境文件（backend 配置只放在 backend/.env）：
+
+```bash
+# tool/ 下创建 .env，参考 tool/.env.example：
+weather_host = '127.0.0.1'
+weather_port = '8000'                # 与 backend/mcp.json 的 weather 端点一致
+amap_key = ''                        # 高德 Web 服务 Key（天气地理编码，可选）
+food_host = '127.0.0.1'
+food_port = '8002'                   # 与 backend/mcp.json 的 meal 端点一致
+API_BASE_URL = 'https://www.themealdb.com/api/json/v1'
+THEMEALDB_API_KEY = '1'            # TheMealDB 公开测试 Key（'1' 为官方默认，可直接使用）
 ```
 
 MCP 配置：将 `backend/mcp_example.json` 复制为 `backend/mcp.json`（真实端点，含 Key，不入库）并填写；`weather` / `food` / `travel` 三个子智能体都会读取它。

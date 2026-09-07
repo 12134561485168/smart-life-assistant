@@ -11,7 +11,7 @@
   },
   "food": {
     "howtocook": {
-      "url": "https://mcpmarket.cn/mcp/{key}",
+      "url": "https://mcpmarket.cn/mcp/5d1970f30b39f7e396b68962",
       "transport": "streamable-http"
     },
     "meal": {
@@ -21,15 +21,15 @@
   },
   "travel": {
     "12306":{
-      "url":"https://mcpmarket.cn/mcp/{key}",
+      "url":"https://mcpmarket.cn/mcp/baf4328e233e147940a1ea0f",
       "transport":"streamable-http"
     },
     "amp":{
-      "url":"https://mcpmarket.cn/mcp/{key}",
+      "url":"https://mcpmarket.cn/mcp/b237bc77660a95213b4d0d00",
       "transport":"streamable-http"
     },
     "airplane":{
-      "url":"https://mcpmarket.cn/mcp/{key}",
+      "url":"https://mcpmarket.cn/mcp/e398e057d41d3e058bde11a7",
       "transport":"streamable-http"
     }
   }
