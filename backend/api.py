@@ -47,7 +47,7 @@ class Question(BaseModel):
     resume: str | None = Field(
         default=None,
         description="中断请教（interrupt）的恢复值：用户在澄清问询中补充的信息；"
-        "非空时本次请求以 Command(resume=...) 恢复执行（check 节点拿到补充后回 plan 重规划）",
+        "非空时本次请求以 Command(resume=...) 恢复执行（check 节点拿到补充后回 schedule 续派剩余任务）",
     )
     username: str = "admin"
 
@@ -285,7 +285,7 @@ def _sse(event: str, data: dict) -> str:
 
 
 def _plan_steps(tasks: list) -> list[dict]:
-    """把新 agent 的 tasks（含 task_depend 依赖）整理为按执行波次分组的计划步骤。
+    """把主图 plan 产出的 tasks（含 task_depend 依赖）整理为按执行波次分组的计划步骤。
 
     无依赖的任务处于第 1 波；有依赖的任务波次 = 其依赖任务波次最大值 + 1。
     返回 [{id, wave, question}]，供前端按波次分组展示。
@@ -338,7 +338,7 @@ def _node_to_events(node: str, fields, checkpoint_id: str | None = None,
     if node == "schedule":
         return []  # 无有效进度，跳过
     if node == "run_subagent":
-        # 新 agent：run_subagent 一次性派发多个（可并行）子任务，写入 step_results
+        # run_subagent：每个 superstep 派发一批就绪（可能并行）子任务，结果写入 step_results
         out = []
         for sid, info in (fields.get("step_results") or {}).items():
             info = info if isinstance(info, dict) else {}
@@ -388,7 +388,7 @@ def _node_to_events(node: str, fields, checkpoint_id: str | None = None,
             "checkpoint_id": checkpoint_id, "value": value,
         }]
     if node == "guard":
-        # 新 guard 未通过时会把 answer 替换为兜底文案；这里仅记录"已拦截/已放行"状态
+        # guard 通过时 answer 原样放行、未通过时替换为安全兜底文案；这里仅记录"已拦截/已放行"状态
         value = {"passed": not bool(fields.get("answer"))} if "answer" in fields else {"passed": True}
         return [{
             "id": node, "node": node, "label": label, "type": "info",
@@ -441,7 +441,7 @@ async def answer_stream(question: Question):
     - check 节点发现某步骤缺必要信息（status="no_data"）时暂停执行并向前端推送
       `interrupt` 事件（携带澄清问题与中断检查点）；前端展示问询、用户补充后，
       携带 checkpoint_id=中断点 + resume=补充信息再次请求，本接口以 Command(resume=...)
-      恢复执行，check 拿到补充后回 plan 重新规划。
+      恢复执行，check 拿到补充后回 schedule 续派剩余任务。
     - 客户端断开连接（前端点击「停止生成」）时，生成器收到 CancelledError 后退出，
       已完成的步骤检查点仍保留在 Redis，供后续续问 / 重答作为分支锚点。
     """
@@ -621,8 +621,8 @@ async def history(thread_id: str, username: str = "admin"):
             return []
 
     latest_values = states[0].values
-    # 新 agent 不把 AI 回答写入 messages，历史仅含用户消息与（可能的）摘要；
-    # 每轮最终答案保存在该轮结束检查点的 answer 字段中，需据此重建"用户→AI"对。
+    # 主图会把每轮 AI 回答写入 messages（guard / fallback 末尾追加 AIMessage），
+    # 历史以用户消息为骨架，各轮 AI 回答由 _answer_at 从 messages 取回。
     dialogue = [
         _coerce_message(m)
         for m in latest_values.get("messages", [])
@@ -649,8 +649,18 @@ async def history(thread_id: str, username: str = "admin"):
             round_end[mid] = cid
 
     def _answer_at(cid):
-        v = cid_values.get(cid)
-        return ((v or {}).get("answer") or "").strip()
+        v = cid_values.get(cid) or {}
+        # 主图现把每轮 AI 回答以 AIMessage 写入 messages（guard / fallback 末尾追加）；
+        # 优先取该轮 messages 中最新的 AIMessage。
+        for m in reversed(v.get("messages") or []):
+            m = _coerce_message(m)
+            if isinstance(m, AIMessage):
+                return (getattr(m, "content", "") or "").strip()
+        # 该轮在 messages 中无 AI 回答：若是中断挂起点则视为尚未产出答案（返回空，
+        # 避免把上一轮 answer 错配给本轮）；否则回退到历史遗留的 state.answer 字段。
+        if interrupt_map.get(cid):
+            return ""
+        return (v.get("answer") or "").strip()
 
     out, prev_after, last_human = [], None, None
     for m in dialogue:

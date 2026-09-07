@@ -47,7 +47,7 @@ with open(_MCP_PATH, "r", encoding="utf-8") as f:
 
 @lru_cache(maxsize=1)
 def get_mcp_client() -> MultiServerMCPClient:
-    """获取缓存的 MCP 客户端，避免每次天气查询都重复握手建立连接。"""
+    """获取缓存的 MCP 客户端，避免每次美食查询都重复握手建立连接。"""
     return MultiServerMCPClient(connections=config)
 
 

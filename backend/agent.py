@@ -150,7 +150,10 @@ def input_node(state: GraphState):
     return updates
 
 async def plan_node(state: GraphState):
-    """规划节点：把问题拆解成一张"网络计划图"（每步 task/question/depends_on）。
+    """规划节点：把用户问题拆解成可执行的任务网络图（tasks 列表）。
+
+    每个任务含 5 个字段：task_id / task_name / task_question / task_node / task_depend；
+    输出按执行顺序排列（先驱在前），依赖关系由 task_depend 驱动串行/并行调度。
     """
     prompt = SystemMessage(
         content=(
@@ -246,7 +249,7 @@ async def run_subagent(state: GraphState) -> dict:
     step = state["current_task"]
     content, result, error = "", "", ""
     key_data = {}
-    status = "failed"  # 默认失败；以下成功后以子图返回的 phase 覆盖
+    status = "failed"  # 默认失败；以下按子图返回的 status（success / no_data / failed）覆盖
     try:
         prompt = (step.get("task_question") or "")
         deps = state.get("deps_context") or {}
@@ -301,11 +304,11 @@ async def run_subagent(state: GraphState) -> dict:
 
 
 async def check_node(state: GraphState) -> dict:
-    """检查节点：汇总本轮所有步骤的执行结果，判断是否需要回 plan 重规划或继续派发。
+    """检查节点：汇总本轮所有步骤的执行结果，按 status 分流。
 
-    1. 若有失败步骤且未达重试上限，则回 plan 重规划；
-    2. 若全部步骤完成，则汇总结果写入 all_task_results 并进入 merge 汇总；
-    3. 若仍有就绪步骤，则回 schedule 续派（串行依赖）。
+    1. 缺数据（no_data）：向用户中断请教补充信息后回 schedule 续派；达上限走 fallback；
+    2. 失败（failed）：回 plan 结合错误信息重规划；达上限走 fallback；
+    3. 全部成功：回 schedule（由其判断全部完成进 merge，或有就绪步骤续派串行依赖）。
     """
     step_results = state.get("step_results", {})
     import collections
@@ -336,7 +339,8 @@ async def check_node(state: GraphState) -> dict:
 
 async def fallback_node(state: GraphState) -> dict:
     """兜底节点：当所有步骤失败或达到重试上限时，返回一个默认答复。"""
-    return {"answer": "抱歉，这个问题我暂时无法回答。目前我只开放**天气**、**美食**与**出行**三类能力，您的问题似乎超出了我的服务范围。您可以试着问问我：某地的实时天气如何、某道菜的具体做法、或两地之间的车次怎么查询，我会尽我所能帮到您～"}
+    return {"answer": "抱歉，这个问题我暂时无法回答。目前我只开放**天气**、**美食**与**出行**三类能力，您的问题似乎超出了我的服务范围。您可以试着问问我：某地的实时天气如何、某道菜的具体做法、或两地之间的车次怎么查询，我会尽我所能帮到您～",
+    "messages":AIMessage(content="抱歉，这个问题我暂时无法回答。目前我只开放**天气**、**美食**与**出行**三类能力，您的问题似乎超出了我的服务范围。您可以试着问问我：某地的实时天气如何、某道菜的具体做法、或两地之间的车次怎么查询，我会尽我所能帮到您～")}
 
 
 async def feedback_node(state: GraphState):
@@ -367,24 +371,24 @@ def feed_path(state: GraphState):
     return "plan"
 
 async def guard_node(state: GraphState):
-    """输出防护节点：对所有最终答复做①内容安全审核②格式/协议检查。
+    """输出防护节点：最终输出的安全审核（唯一职责）。
 
-    两项均通过则原样放行；任一未通过则替换为安全兜底文案并记录，避免
-    有害内容外泄或非法格式流入下游。
+    准确性 / 完整性 / 格式已由 feedback 验收环节把关，本节点只做内容安全审核：
+    通过则原样放行；未通过则替换为安全兜底文案，避免有害内容外泄。
     """
     prompt = [SystemMessage(
-        "你是一位严格的内容安全与输出质量审核师。请审核待输出的回答是否同时满足以下条件：\n"
-        "1. 内容安全：不包含色情、暴力、违法违规、歧视、诈骗、医疗/投资建议等风险不当或有害信息；\n"
-        "2. 内容相关：答复与所问问题匹配，没有偏题、乱码或无意义的重复内容；\n"
-        "3. 格式规范：没有明显的 HTML/脚本残留、脱敏失败或不可读的异常输出。\n"
-        "仅当以上全部通过时 flag 输出 true，否则输出 false。只需输出结构化字段，不要附加任何解释。"
+        "你是一位内容安全审核师，是最终输出的安全防线。只对\"待输出的回答\"做内容安全审核"
+        "（准确性、完整性、格式已由验收环节把关，本环节不再评估），逐项检查：\n"
+        "1. 无违禁内容：不包含色情、暴力恐怖、违法违规、涉政敏感等不当或有害信息；\n"
+        "2. 无风险内容：不包含歧视、诈骗诱导、医疗/投资等不当建议、恶意引导或煽动性言论。\n"
+        "全部安全时 flag 输出 true，否则输出 false。只需输出结构化字段，不要附加任何解释。"
     ), HumanMessage(content=state.get('answer'))]
     model = chat_model()
     model = model.with_structured_output(guard_result)
     flag = await model.ainvoke(prompt)
     if flag.get('flag'):
-        return {}
-    return {'answer':'你的问题我无法回答'}
+        return {'messages':AIMessage(content=state.get('answer'))}
+    return {'answer':'你的问题我无法回答','messages':AIMessage(content='你的问题我无法回答')}
 
 async def merge_node(state: GraphState):
     add_info = state.get("add_info") or ""
@@ -427,13 +431,14 @@ async def get_agent_graph():
     graph.add_node("guard", guard_node)
     graph.add_edge(START, "input")
     graph.add_edge("input", "plan")
-    # plan 产出任务后交给 schedule 派发；若 plan 为空（无可执行任务），
-    # schedule 将直接进入 merge（由 merge 对空结果汇总兜底给出答复）
+    # plan 产出任务后交给 schedule 派发；若 plan 为空（无可执行任务）：
+    # 已有成功结果→进 merge 汇总；一无所有→进 fallback 兜底
     graph.add_edge("plan", "schedule")
     # 步骤完成后静态汇合到 check（fan-in 只执行一次，能看到本批全部完成结果）
     graph.add_edge("run_subagent", "check")
-    # check 后分流：失败→回 plan 重规划；全部完成→merge 汇总；仍有就绪步骤→回 schedule 续派（串行依赖）
-    # 汇总后进入反馈验收；不通过且未达上限→回 plan 重规划，通过→进入输出防护 guard
+    # check 后分流：缺数据→打断请教后回 schedule；失败→回 plan 重规划；成功→回 schedule（续派或进 merge 汇总）
+    # 汇总后进入反馈验收：不通过且未达上限→回 plan 重规划；
+    # 通过（或已达 MAX_FEEDBACK 上限强制放行）→进入输出防护 guard
     graph.add_edge("merge", "feedback")
     graph.add_conditional_edges(
         "feedback",
