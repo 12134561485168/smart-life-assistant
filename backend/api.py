@@ -529,16 +529,17 @@ async def answer_stream(question: Question):
             msgs = st.values.get("messages") or []
             human_msg = next((m for m in reversed(msgs) if isinstance(m, HumanMessage)), None)
             ai_msg = next((m for m in reversed(msgs) if isinstance(m, AIMessage)), None)
-            # 正常完成：把本轮全部过程节点内容写入 Redis。
-            # 前端展示"思考过程"时以该轮 AI 消息的落盘点为锚，而 after_cid 是
-            # 整个 superstep（含 guard 等无消息节点）结束后的检查点，二者通常不同；
-            # 故以该轮 AI 消息对应的检查点为锚再写一份，保证 /history 能命中 proc。
+            # 正常完成：把本轮全部过程节点内容写入 Redis 多份锚。
+            # after_cid 是整轮（含 guard 追加 AI 后）结束的检查点，而 /history 侧用
+            # "该轮用户消息最后一次作为末尾"=AI 写入前的检查点取 proc，两者不同；
+            # 故同时以这两个锚各写一份，保证 /history 能命中该轮思考过程。
             saved_cids = {after_cid}
             if ai_msg is not None:
-                # /history 里每条 AI 消息以"消息首次写入的检查点"为锚取 proc，
-                # 该锚位于 after_cid（superstep 全部结束后）之前；从最新检查点
-                # 向旧遍历，直到遇到不再包含该消息的检查点为止，即得到该写入锚。
-                anchor = None
+                # /history 里每条 AI 消息以"该轮用户消息最后一次作为 messages 末尾的
+                # 检查点"（round_end，位于 AI 消息写入之前）为锚取 proc。这里把 proc
+                # 同时落到 ①AI 消息写入后的检查点(after_cid) 与 ②AI 消息写入前最近的
+                # 检查点（guard/fallback 追加 AIMessage 之前的那个），保证 /history 命中。
+                before_cid = None
                 async for st in graph.aget_state_history(
                     {"configurable": {"thread_id": thread_id}}, limit=200
                 ):
@@ -547,11 +548,11 @@ async def answer_stream(question: Question):
                         getattr(_coerce_message(m), "id", None) == getattr(ai_msg, "id", None)
                         for m in msgs
                     ):
-                        anchor = st.config["configurable"].get("checkpoint_id")
-                    else:
-                        break  # 已跨过该消息首次写入前的检查点
-                if anchor:
-                    saved_cids.add(anchor)
+                        continue  # 仍包含该 AI：继续向旧遍历，找它首次写入前的检查点
+                    before_cid = st.config["configurable"].get("checkpoint_id")
+                    break  # 已跨过该消息首次写入前的检查点
+                if before_cid:
+                    saved_cids.add(before_cid)
             for anchor_cid in saved_cids:
                 _save_proc(thread_id, anchor_cid, collected)
             yield _sse("done", {
@@ -634,9 +635,11 @@ async def history(thread_id: str, username: str = "admin"):
     chrono = list(reversed(states))
     cid_values: dict = {}      # checkpoint_id -> 该检查点的 state 值
     round_end: dict = {}       # 用户消息 id -> 该轮结束检查点 id
+    interrupt_map: dict = {}   # checkpoint_id -> 是否该检查点为中断挂起（尚未产出答案）
     for s in chrono:
         cid = s.config["configurable"]["checkpoint_id"]
         cid_values[cid] = s.values
+        interrupt_map[cid] = bool(getattr(s, "interrupts", None))
         msgs = s.values.get("messages") or []
         tail = None
         for m in reversed(msgs):

@@ -4,7 +4,13 @@ from functools import lru_cache
 from langchain.chat_models import init_chat_model
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 
-
+# OpenCode Go 网关要求请求携带会话头与自有 User-Agent：
+# - x-opencode-session：每个对话稳定的会话 id（用于路由与 prompt 缓存）
+# - User-Agent：标识自有客户端，而非通用 SDK 名（否则可能被网关拒绝）
+OPENCODE_HEADERS = {
+    "x-opencode-session": os.getenv("opencode_session", "23124124"),
+    "User-Agent": "wanxiang-agent/1.0",
+}
 @lru_cache(maxsize=1)
 def chat_cloud_model():
     return init_chat_model(
@@ -13,6 +19,8 @@ def chat_cloud_model():
         api_key=os.getenv("model_api"),
         base_url=os.getenv("base_url"),
         streaming=True,
+        default_headers=OPENCODE_HEADERS,
+        extra_body={"thinking": {"type": "disabled"}}
     )
 
 
@@ -50,5 +58,5 @@ def embeddings_model():
     return OllamaEmbeddings(
         model=os.getenv("embeddings_model", "qwen3-embedding:latest"),
         base_url=os.getenv("ollama_url", "http://localhost:11434"),
-        dimensions=1024,
+        dimensions=1024
     )

@@ -1,6 +1,9 @@
 <script setup>
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
+import { marked } from 'marked'
 import ThinkingPanel from './components/ThinkingPanel.vue'
+
+marked.setOptions({ gfm: true, breaks: true })
 
 /* ============ 树模型状态 ============
  * treeState.root：容器根节点（role='root'，仅作根级用户的并列挂载点），每个节点：
@@ -467,6 +470,13 @@ function isActiveBranch(child) {
 function cleanContent(text) {
   return (text || '').replace(/【\s*(weather|food)\s*】\s*[\r\n]*/g, '').trim()
 }
+/* 将 AI 回复的 markdown 渲染为 HTML。仅用于 AI 消息气泡（v-html 展示）。
+ * 先剥离脚本标签、避免模型输出被注入执行，其余交由 marked 渲染。 */
+function renderMd(text) {
+  if (!text) return ''
+  const safe = String(text).replace(/<\s*script[\s\S]*?<\s*\/s*\s*script\s*>/gi, '')
+  return marked.parse(safe) || ''
+}
 /* 返回 node 在当前激活分支中的序号（1 起）；未激活返回 0 */
 function activeChildIndex(node) {
   const idx = (node.children || []).findIndex(ch => isActiveBranch(ch))
@@ -710,7 +720,8 @@ onMounted(() => {
           <div class="msg-row" :class="node.role === 'human' ? 'row-human' : 'row-ai'">
             <div v-if="node.role === 'ai'" class="avatar ai">万</div>
             <div class="bubble-wrap">
-              <div class="bubble" :class="node.role">{{ cleanContent(node.content) }}</div>
+              <div v-if="node.role === 'ai'" class="bubble bubble-ai" v-html="renderMd(node.content)"></div>
+              <div v-else class="bubble bubble-human">{{ cleanContent(node.content) }}</div>
               <div class="msg-meta">
                 <span class="ts-tag">{{ fmt(node.ts) }}</span>
               </div>
@@ -746,7 +757,7 @@ onMounted(() => {
 
       <div v-if="sending" class="msg-row row-ai">
         <div class="avatar ai">万</div>
-        <div class="bubble ai typing"><span></span><span></span><span></span></div>
+        <div class="bubble bubble-ai typing"><span></span><span></span><span></span></div>
       </div>
     </main>
 
