@@ -621,100 +621,96 @@ async def history(thread_id: str, username: str = "admin"):
             logger.warning("解析过程节点内容失败 thread=%s cid=%s: %s", tid, cid, exc)
             return []
 
-    latest_values = states[0].values
-    # 主图会把每轮 AI 回答写入 messages（guard / fallback 末尾追加 AIMessage），
-    # 历史以用户消息为骨架，各轮 AI 回答由 _answer_at 从 messages 取回。
-    dialogue = [
-        _coerce_message(m)
-        for m in latest_values.get("messages", [])
-        if isinstance(_coerce_message(m), HumanMessage)
-    ]
-
-    # 记录"每个用户消息所在轮的结束检查点 id"：从最旧到最新遍历，覆盖写入，
-    # 最终保留的是该用户消息最后一次作为消息末尾的那个检查点（= 该轮回答落盘位置）
+    # 收集该线程内所有"已完成的轮"（含各分支）：遍历全部检查点（旧→新），
+    # 一个轮 = messages 中至少含用户问题的那一段；有 guard/fallback 追加的 AIMessage
+    # 即为"已完成的轮"。重生成 / 分支会让同一问题产生多个回答版本，全部收集，
+    # 供前端重建"回答分支"（同一问题的多个回答并列，而非只返回当前最新分支）。
     chrono = list(reversed(states))
-    cid_values: dict = {}      # checkpoint_id -> 该检查点的 state 值
-    round_end: dict = {}       # 用户消息 id -> 该轮结束检查点 id
-    interrupt_map: dict = {}   # checkpoint_id -> 是否该检查点为中断挂起（尚未产出答案）
+    finished = []
+    seen = set()
     for s in chrono:
-        cid = s.config["configurable"]["checkpoint_id"]
-        cid_values[cid] = s.values
-        interrupt_map[cid] = bool(getattr(s, "interrupts", None))
-        msgs = s.values.get("messages") or []
-        tail = None
-        for m in reversed(msgs):
-            m = _coerce_message(m)
-            if isinstance(m, HumanMessage):
-                tail = m
-                break
-        mid = getattr(tail, "id", None) if tail is not None else None
-        if mid:
-            round_end[mid] = cid
+        msgs = [_coerce_message(m) for m in (s.values.get("messages") or [])]
+        if not msgs:
+            continue
+        # 只采集"已收尾"的轮：最后一个消息必须是 AI 回答。中途检查点（新问题已追加、
+        # 但尚未产出回答）最后一条仍是用户消息，若也采集会把上一轮的 AI 误挂到新问题上，
+        # 导致分支重建时"后续消息对不上"。
+        if not isinstance(msgs[-1], AIMessage):
+            continue
+        ai = msgs[-1]
+        human = next((m for m in reversed(msgs) if isinstance(m, HumanMessage)), None)
+        if human is None:
+            continue
+        answer = (getattr(ai, "content", "") or "").strip()
+        # 同 (问题, 回答) 去重，避免同一轮在多个检查点被重复采集
+        key = (human.content, answer)
+        if key in seen:
+            continue
+        seen.add(key)
+        finished.append(
+            {
+                "q": human.content,
+                "human_id": getattr(human, "id", None),
+                "answer": answer,
+                "cid": s.config["configurable"]["checkpoint_id"],
+            }
+        )
 
-    def _answer_at(cid):
-        v = cid_values.get(cid) or {}
-        # 主图现把每轮 AI 回答以 AIMessage 写入 messages（guard / fallback 末尾追加）；
-        # 优先取该轮 messages 中最新的 AIMessage。
-        for m in reversed(v.get("messages") or []):
-            m = _coerce_message(m)
-            if isinstance(m, AIMessage):
-                return (getattr(m, "content", "") or "").strip()
-        # 该轮在 messages 中无 AI 回答：若是中断挂起点则视为尚未产出答案（返回空，
-        # 避免把上一轮 answer 错配给本轮）；否则回退到历史遗留的 state.answer 字段。
-        if interrupt_map.get(cid):
-            return ""
-        return (v.get("answer") or "").strip()
-
-    out, prev_after, last_human = [], None, None
-    for m in dialogue:
-        mid = getattr(m, "id", None)
-        if mid in revoked:
+    out, last_cid, seen_q = [], None, set()
+    for it in finished:
+        if it["human_id"] in revoked:
             continue  # 该消息已被前端撤销，跳过不渲染
-        last_human = m.content
-        out.append({"id": mid, "role": "human", "content": m.content})
-        after = round_end.get(mid)
-        answer = _answer_at(after)
-        if not answer:
-            continue  # 本轮尚未产出答案（中断等待补充/被打断），由下方 pending 逻辑补齐
+        # 同一问题出现多个回答版本（重新回答/分支）时，只有第一次出现才产出用户消息；
+        # 其余回答作为该问题的并列"回答分支"，其 AI 消息以 question 指向原问题，供前端归并。
+        if it["q"] not in seen_q:
+            out.append({"id": it["human_id"], "role": "human", "content": it["q"]})
+            seen_q.add(it["q"])
+        if not it["answer"]:
+            continue  # 该轮尚未产出答案（中断等待补充/被打断），由下方 pending 逻辑补澄清
         out.append(
             {
                 "id": None,
                 "role": "ai",
-                "content": answer,
-                "question": last_human,  # 该轮提问（重答时直接复用）
+                "content": it["answer"],
+                "question": it["q"],  # 该轮提问（重答时直接复用，前端据此归并到原问题下）
                 # 重答基线：上一轮落盘点（首轮为 ROOT_MARKER）
-                "re_answer_from": prev_after or ROOT_MARKER,
+                "re_answer_from": last_cid or ROOT_MARKER,
                 # 本轮回答落盘点：前端树模型中 AI 节点的 fork 锚点
-                "checkpoint_id": after,
+                "checkpoint_id": it["cid"],
                 # 该轮的"思考过程"（流式回答时落库，按轮次锚=回答落盘点取回）
-                "proc": _proc_for(after),
+                "proc": _proc_for(it["cid"]),
             }
         )
-        prev_after = after
+        last_cid = it["cid"]
     # 图在 check 节点 interrupt 暂停（等待用户补充信息）：AI 的澄清问题此时只存在于
     # 检查点的 interrupts 中，未写入 messages，本轮也没有 answer。
-    # 若对话末尾是用户消息且存在待处理的澄清提问，则把它作为一条"等待补充"的 AI 消息追加。
-    if out and out[-1].get("role") != "ai":
+    # 若对话末尾停在"等待补充"的用户消息，则把它作为一条"等待补充"的 AI 消息追加。
+    msgs_now = [_coerce_message(m) for m in (states[0].values.get("messages") or [])] if states else []
+    if msgs_now and not isinstance(msgs_now[-1], AIMessage):
         intrs = getattr(states[0], "interrupts", None) or ()
-        if intrs:
-            ask_text = str(getattr(intrs[0], "value", "") or "")
-            if ask_text:
-                cid_now = states[0].config["configurable"].get("checkpoint_id")
-                out.append(
-                    {
-                        "id": None,
-                        "role": "ai",
-                        "content": ask_text,
-                        "question": last_human,
-                        # 重答基线：上一轮落盘点（首轮为 ROOT_MARKER）
-                        "re_answer_from": prev_after or ROOT_MARKER,
-                        # 中断检查点：前端据此把该 AI 消息绑定到"暂停等待补充"的锚点
-                        "checkpoint_id": cid_now,
-                        "pending": True,  # 标记为等待补充信息
-                        # 该轮已发生的"思考过程"（直到 check 中断点为止），供前端还原
-                        "proc": _proc_for(cid_now),
-                    }
-                )
+        ask_text = str(getattr(intrs[0], "value", "") or "") if intrs else ""
+        human_now = next((m for m in reversed(msgs_now) if isinstance(m, HumanMessage)), None)
+        if ask_text and human_now is not None:
+            q = getattr(human_now, "content", "") or ""
+            cid_now = states[0].config["configurable"].get("checkpoint_id")
+            if q and q not in seen_q and (getattr(human_now, "id", None) not in revoked):
+                out.append({"id": getattr(human_now, "id", None), "role": "human", "content": q})
+                seen_q.add(q)
+            out.append(
+                {
+                    "id": None,
+                    "role": "ai",
+                    "content": ask_text,
+                    "question": q,
+                    # 重答基线：上一轮落盘点（首轮为 ROOT_MARKER）
+                    "re_answer_from": last_cid or ROOT_MARKER,
+                    # 中断检查点：前端据此把该 AI 消息绑定到"暂停等待补充"的锚点
+                    "checkpoint_id": cid_now,
+                    "pending": True,  # 标记为等待补充信息
+                    # 该轮已发生的"思考过程"（直到 check 中断点为止），供前端还原
+                    "proc": _proc_for(cid_now),
+                }
+            )
     return {"thread_id": thread_id, "messages": out}
 
 

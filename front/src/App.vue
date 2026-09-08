@@ -26,6 +26,10 @@ const clarifyInput = ref('')
 /* 流式过程：一次回答期间实时累积的节点步骤（可折叠） */
 const proc = ref([]) // 生成中实时累积的步骤（思考面板由 ThinkingPanel 子组件按"各轮回答"独立渲染）
 
+/* 是否有「正生成中的分支内 AI 节点」（重新回答场景）：有则该分支就地显示思考区与打字动画，
+ * 并隐藏底部全局生成区，避免重复展示 */
+const hasAnyInlineGen = computed(() => activePath.value.some(n => n.role === 'ai' && n.generating))
+
 /* ============ 用户登录 ============ */
 const user = ref(localStorage.getItem('wx_user') || '')
 const authed = computed(() => !!user.value)
@@ -153,13 +157,39 @@ async function initFromHistory() {
     if (!msgs.length) return
     ensureRoot()
     let prev = null
+    let lastHuman = null
+    // 问题索引：content -> 该问题（首个人类）节点。用于把"重新回答/分支"产生的
+    // 同一问题（content 相同）的后续消息挂到同一问题上作为"回答分支"，而不是接到链尾。
+    const humanIndex = new Map()
     for (const m of msgs) {
-      const node = makeNode(m.role, m.content, prev ? prev.id : ROOT_ID, m.role === 'ai' ? m.checkpoint_id : null, m.id || null)
-      // AI 节点绑定该轮"思考过程"（后端 /history 按轮次锚从 Redis 取回），供 ThinkingPanel 独立渲染
-      if (m.role === 'ai' && Array.isArray(m.proc) && m.proc.length) node.proc = m.proc
-      if (!prev) treeState.root.children.push(node)
-      else prev.children.push(node)
-      prev = node
+      if (m.role === 'human') {
+        const dup = humanIndex.get(m.content)
+        if (dup) {
+          // 同一问题再次出现（重生成 a1：q1→a1→q2→a2 之外还有 q1→a1'）：
+          // 后续消息全部归到该问题下，作为它的并列回答分支；不新建问题节点。
+          lastHuman = dup
+          prev = dup
+          continue
+        }
+        const node = makeNode('human', m.content, prev ? prev.id : ROOT_ID, null, m.id || null)
+        if (!prev) treeState.root.children.push(node)
+        else prev.children.push(node)
+        humanIndex.set(m.content, node)
+        lastHuman = node
+        prev = node
+      } else {
+        // AI 回答挂到"它回答的那个问题"下（用后端带回的 question 精确匹配），
+        // 而不是挂到"最近一个人类节点"。这样重新回答 / 分支产生的并列回答（q1 下的 a1'）
+        // 会正确归到 q1 下，不会被接到链尾或其它问题后面，避免"后续消息对不上"。
+        const host = humanIndex.get(m.question) || lastHuman
+        const node = makeNode('ai', m.content, host ? host.id : ROOT_ID, m.checkpoint_id || null, m.id || null)
+        // AI 节点绑定该轮"思考过程"（后端 /history 按轮次锚从 Redis 取回），供 ThinkingPanel 独立渲染
+        if (Array.isArray(m.proc) && m.proc.length) node.proc = m.proc
+        if (host) host.children.push(node)
+        else treeState.root.children.push(node)
+        lastHuman = host || lastHuman
+        prev = node
+      }
     }
     activateThrough(treeState.root.children[0])
     scrollToBottom()
@@ -172,12 +202,23 @@ async function initFromHistory() {
  * 过程节点（规划/工具/检查/反馈等）实时累积到 proc（可折叠），done 时产出最终结果作为 AI 消息。
  * 每条 process 事件携带当前 checkpoint_id（暂存到 interruptCid）；点击「停止生成」时，
  * 以打断前最后一次收到的 checkpoint 作为 AI 消息的 checkpoint 收尾，保留已进行的进度。 */
-async function ask(parentHuman, question, checkpointId, resume) {
+async function ask(parentHuman, question, checkpointId, resume, immediateBranch = false) {
   sending.value = true
   proc.value = []
   const ctl = new AbortController()
   abortCtl.value = ctl
   let interruptCid = null // 打断时用于保存 AI 消息的 checkpoint（最新 process 事件携带）
+  // 重新回答（immediateBranch=true）：一旦开始生成，立即在对应问题下建立新分支节点并切换过去，
+  // 生成中的思考过程实时显示在该分支处；完成后结果就地回填该节点，而非等全部生成完才进分支。
+  let host = null
+  if (immediateBranch) {
+    host = makeNode('ai', '', parentHuman.id, null, null)
+    host.generating = true
+    host.proc = proc.value // 与全局 proc 引用同一数组，实时同步思考过程
+    parentHuman.children.push(host)
+    activateTo(host)
+    scrollToBottom()
+  }
   try {
     const res = await fetch('/answer/stream', {
       method: 'POST',
@@ -247,10 +288,17 @@ async function ask(parentHuman, question, checkpointId, resume) {
     // 中断请教：把澄清问题作为 AI 节点保留（思考过程挂在其上方），并弹窗询问用户补充。
     // 用户提交补充 → resume 恢复执行；不补充选择取消 → 保留该节点与检查点作为 AI 回答。
     if (clarified) {
-      const ai = makeNode('ai', clarified, parentHuman.id, interruptCid, null)
-      ai.proc = proc.value.splice(0) // 该轮思考过程保留在澄清节点上方
-      parentHuman.children.push(ai)
-      activateTo(ai)
+      let ai = host
+      if (ai) {
+        ai.content = clarified
+        ai.checkpointId = interruptCid
+        ai.generating = false // 思考过程已实时保存在 ai.proc，无需再 splice
+      } else {
+        ai = makeNode('ai', clarified, parentHuman.id, interruptCid, null)
+        ai.proc = proc.value.splice(0) // 该轮思考过程保留在澄清节点上方
+        parentHuman.children.push(ai)
+        activateTo(ai)
+      }
       clarifyDialog.value = { visible: true, question: clarified, cid: interruptCid, anchor: ai }
       clarifyInput.value = ''
       scrollToBottom()
@@ -264,14 +312,22 @@ async function ask(parentHuman, question, checkpointId, resume) {
       saveThread()
       refreshSessions()
     }
-    const ai = makeNode('ai', result, parentHuman.id, afterCid, aiMsgId)
-    // 本轮思考过程挂到该 AI 回答上方（整体折叠为一行标题，可展开查看），供后续保留
-    ai.proc = proc.value.splice(0)
-    // resume（补充信息恢复）时 parentHuman 是澄清问询的 AI 节点，不能把后端
-    // 回传的 human_message_id 赋给它，否则撤销/重答会绑定到错误的用户消息
-    if (!resume) parentHuman.msg_id = humanMsgId || parentHuman.msg_id
-    parentHuman.children.push(ai)
-    activateTo(ai)
+    let ai = host
+    if (ai) {
+      ai.content = result
+      ai.checkpointId = afterCid
+      ai.msg_id = aiMsgId || ai.msg_id
+      ai.generating = false // 思考过程已实时保存在 ai.proc，无需再 splice
+    } else {
+      ai = makeNode('ai', result, parentHuman.id, afterCid, aiMsgId)
+      // 本轮思考过程挂到该 AI 回答上方（整体折叠为一行标题，可展开查看），供后续保留
+      ai.proc = proc.value.splice(0)
+      // resume（补充信息恢复）时 parentHuman 是澄清问询的 AI 节点，不能把后端
+      // 回传的 human_message_id 赋给它，否则撤销/重答会绑定到错误的用户消息
+      if (!resume) parentHuman.msg_id = humanMsgId || parentHuman.msg_id
+      parentHuman.children.push(ai)
+      activateTo(ai)
+    }
     scrollToBottom()
   } catch (e) {
     if (e.name === 'AbortError') {
@@ -281,15 +337,29 @@ async function ask(parentHuman, question, checkpointId, resume) {
       // （尚未产出任何检查点时说明刚开始即被打断，不补 AI 消息，仅停留在用户消息）
       if (interruptCid) {
         const note = buildInterruptedNote()
-        const ai = makeNode('ai', note, parentHuman.id, interruptCid, null)
-        ai.proc = proc.value.splice(0) // 打断后思考过程保留在该 AI 消息上方
-        parentHuman.children.push(ai)
-        activateTo(ai)
+        if (host) {
+          host.content = note
+          host.checkpointId = interruptCid
+          host.generating = false
+        } else {
+          const ai = makeNode('ai', note, parentHuman.id, interruptCid, null)
+          ai.proc = proc.value.splice(0) // 打断后思考过程保留在该 AI 消息上方
+          parentHuman.children.push(ai)
+          activateTo(ai)
+        }
         scrollToBottom()
+      } else if (host) {
+        // 刚开始即被打断、无输出：撤销刚才立即创建的空分支
+        const idx = parentHuman.children.indexOf(host)
+        if (idx >= 0) parentHuman.children.splice(idx, 1)
       } else {
         proc.value = []
       }
     } else {
+      if (host) {
+        const idx = parentHuman.children.indexOf(host)
+        if (idx >= 0) parentHuman.children.splice(idx, 1)
+      }
       showAlert('回答失败：' + e.message, '出错了')
       proc.value = []
     }
@@ -415,12 +485,13 @@ function submitEdit() {
   ask(human, q, cid)
 }
 
-/* 重新生成 AI 回答：以该轮提问前最近落盘点 fork 新分支 */
+/* 重新生成 AI 回答：以该轮提问前最近落盘点 fork 新分支；
+ * 生成一开始即切到新分支（immediateBranch），思考过程实时显示在该分支处。 */
 function regenerate(node) {
   if (sending.value) return
   const parent = node.parentId ? findNode(treeState.root, node.parentId) : null
   const cid = lastAICheckpoint(parent)
-  ask(parent, parent.content, cid)
+  ask(parent, parent.content, cid, null, true)
 }
 
 /* 收集某节点及其所有子孙的后端消息 id（撤销持久化） */
@@ -496,6 +567,29 @@ function switchBranch(node, delta) {
   if (idx === -1) idx = 0
   const next = Math.min(Math.max(idx + delta, 0), chs.length - 1)
   if (next !== idx) activateThrough(chs[next])
+}
+/* ============ 回答分支（重新生成的多个回答）============ */
+/* 问题分支与回答分支分离：同一问题下并列的多个 AI 回答（含重新生成）属于"回答分支"，
+ * 切换条显示在各回答处；真正的"问题分支"（如会话起点的多路线）仍显示在问题处。 */
+function answerParent(node) {
+  return node.parentId ? findNode(treeState.root, node.parentId) : null
+}
+function hasAnswerBranches(node) {
+  const p = answerParent(node)
+  return p && p.role === 'human' && (p.children || []).length > 1
+}
+function answerIndex(node) {
+  const p = answerParent(node)
+  const i = p ? (p.children || []).indexOf(node) : -1
+  return i === -1 ? 1 : i + 1
+}
+function answerTotal(node) {
+  const p = answerParent(node)
+  return p ? (p.children || []).length : 1
+}
+function switchAnswerBranch(node, delta) {
+  const p = answerParent(node)
+  if (p) switchBranch(p, delta)
 }
 function fmt(ts) {
   const d = new Date(ts)
@@ -716,12 +810,32 @@ onMounted(() => {
       <template v-for="(node, i) in activePath" :key="node.id">
         <template v-if="node.role !== 'root'">
           <!-- 该轮 AI 回答各自保留的思考过程区，显示在该回答上方（线性"先思考后回答"） -->
-          <ThinkingPanel v-if="node.role === 'ai'" :items="node.proc" />
+          <!-- node.generating 表示这条分支正在生成中（重新回答：一进入即切换并实时展示思考过程）；未生成时展示已完成思考区 -->
+          <ThinkingPanel
+            v-if="node.role === 'ai' && (node.generating || (node.proc && node.proc.length))"
+            :items="node.proc || []"
+            :expand="node.generating"
+          />
           <div class="msg-row" :class="node.role === 'human' ? 'row-human' : 'row-ai'">
             <div v-if="node.role === 'ai'" class="avatar ai">万</div>
             <div class="bubble-wrap">
-              <div v-if="node.role === 'ai'" class="bubble bubble-ai" v-html="renderMd(node.content)"></div>
-              <div v-else class="bubble bubble-human">{{ cleanContent(node.content) }}</div>
+              <template v-if="node.role === 'ai'">
+                <div v-if="node.generating" class="bubble bubble-ai typing"><span></span><span></span><span></span></div>
+                <div v-else class="bubble bubble-ai" v-html="renderMd(node.content)"></div>
+              </template>
+              <!-- 回答分支：该问题下重新生成的多个回答，切换条显示在回答处；问题分支与之分离 -->
+              <div v-if="node.role === 'ai' && hasAnswerBranches(node)" class="branch-bar answer-branch">
+                <button class="branch-nav" title="上一个回答" :disabled="answerIndex(node) <= 1" @click="switchAnswerBranch(node, -1)">‹</button>
+                <span class="branch-count">&lt;{{ answerIndex(node) }}/{{ answerTotal(node) }}&gt;</span>
+                <button class="branch-nav" title="下一个回答" :disabled="answerIndex(node) >= answerTotal(node)" @click="switchAnswerBranch(node, 1)">›</button>
+              </div>
+              <div v-if="node.role === 'human'" class="bubble bubble-human">{{ cleanContent(node.content) }}</div>
+              <!-- 问题分支：仅"会话起点"存在多条对话路线时在问题处显示，与回答分支分开 -->
+              <div v-if="node.role === 'human' && node.parentId === ROOT_ID && startForkState()" class="branch-bar">
+                <button class="branch-nav" title="上一个问题分支（会话起点）" :disabled="startForkState().idx <= 1" @click="switchBranch(treeState.root, -1)">‹</button>
+                <span class="branch-count">&lt;{{ startForkState().idx }}/{{ startForkState().total }}&gt;</span>
+                <button class="branch-nav" title="下一个问题分支（会话起点）" :disabled="startForkState().idx >= startForkState().total" @click="switchBranch(treeState.root, 1)">›</button>
+              </div>
               <div class="msg-meta">
                 <span class="ts-tag">{{ fmt(node.ts) }}</span>
               </div>
@@ -736,26 +850,13 @@ onMounted(() => {
             </div>
             <div v-if="node.role === 'human'" class="avatar human">我</div>
           </div>
-
-          <!-- 分支可视化与切换（中间用户消息/其下存在多子分支时）：统一展示方式 -->
-          <div v-if="hasBranches(node)" class="branch-bar">
-            <button class="branch-nav" title="上一个分支" :disabled="activeChildIndex(node) <= 1" @click="switchBranch(node, -1)">‹</button>
-            <span class="branch-count">&lt;{{ activeChildIndex(node) }}/{{ node.children.length }}&gt;</span>
-            <button class="branch-nav" title="下一个分支" :disabled="activeChildIndex(node) >= node.children.length" @click="switchBranch(node, 1)">›</button>
-          </div>
-          <!-- 会话起点（第一条用户消息）存在多个兄弟分支：切换栏同样放在对应消息下方 -->
-          <div v-if="node.role === 'human' && node.parentId === ROOT_ID && startForkState()" class="branch-bar">
-            <button class="branch-nav" title="上一个分支（会话起点）" :disabled="startForkState().idx <= 1" @click="switchBranch(treeState.root, -1)">‹</button>
-            <span class="branch-count">&lt;{{ startForkState().idx }}/{{ startForkState().total }}&gt;</span>
-            <button class="branch-nav" title="下一个分支（会话起点）" :disabled="startForkState().idx >= startForkState().total" @click="switchBranch(treeState.root, 1)">›</button>
-          </div>
         </template>
       </template>
 
-      <!-- 进行中的思考过程：紧贴 AI 回答出现位置（打字区上方），回答完成后转移为该回答上方的思考区 -->
-      <ThinkingPanel v-if="sending && proc.length" :items="proc" expand />
+      <!-- 进行中的思考过程：重新回答已就地显示在对应分支时（hasAnyInlineGen），不再在此显示全局区 -->
+      <ThinkingPanel v-if="sending && proc.length && !hasAnyInlineGen" :items="proc" expand />
 
-      <div v-if="sending" class="msg-row row-ai">
+      <div v-if="sending && !hasAnyInlineGen" class="msg-row row-ai">
         <div class="avatar ai">万</div>
         <div class="bubble bubble-ai typing"><span></span><span></span><span></span></div>
       </div>

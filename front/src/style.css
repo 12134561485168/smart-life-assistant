@@ -185,7 +185,7 @@ body {
 /* 分支可视化与切换 */
 .branch-bar {
   display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
-  padding: 6px 0 2px; margin-left: 44px;
+  padding: 2px 0 6px; margin-left: 0;
 }
 .branch-label {
   font-size: 11px; color: var(--primary); font-weight: 700;
