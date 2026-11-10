@@ -7,16 +7,16 @@
     </div>
     <div v-show="!collapsed" class="proc-steps">
       <!-- 按出现顺序组织：任务执行合并成一块，其余过程节点（输入处理/规划/汇总/反馈/检测等）逐条展示 -->
-      <template v-for="(grp, gi) in groups" :key="gi">
-        <!-- 任务执行块：只显示任务的问题与结果（result） -->
+      <template v-for="grp in groups" :key="grp.key">
+        <!-- 任务执行块：只显示任务的问题与结果（result），各块独立折叠 -->
         <div v-if="grp.type === 'tool'" class="proc-step">
-          <button class="p-head" @click="combinedOpen = !combinedOpen">
+          <button class="p-head" @click="toggleCombined(grp)">
             <span class="dot done"></span>
             <span class="p-label">📋 任务执行（{{ grp.items.length }}）</span>
             <span class="p-status">完成</span>
-            <span class="p-chev">{{ combinedOpen ? '▾' : '▸' }}</span>
+            <span class="p-chev">{{ isCombinedOpen(grp) ? '▾' : '▸' }}</span>
           </button>
-          <div v-show="combinedOpen" class="p-body">
+          <div v-show="isCombinedOpen(grp)" class="p-body">
             <div v-for="cs in combinedItems(grp.items)" :key="cs.id" class="tool-item">
               <div class="tool-q">▸ {{ cs.question }}</div>
               <div class="tool-text">{{ cs.content || '（无返回结果）' }}</div>
@@ -69,26 +69,40 @@ const props = defineProps({
 })
 
 const collapsed = ref(!props.expand)
-const combinedOpen = ref(!props.expand)
 const openSteps = ref(new Set())
+/* 任务执行块的展开状态：按块独立记录（key → 是否展开），未记录时沿用初始 expand，
+ * 避免多个任务块共用同一状态而联动展开/收缩。 */
+const combinedState = ref(new Map())
 
 /* 把过程节点按出现顺序组织为展示分组：
  * - 相邻的"任务执行"（tool）合并成一块（只显示问题 + 结果 result）
- * - 其余节点（输入处理 / 规划 / 汇总 / 反馈 / 检测等）逐条展示，保留顺序 */
+ * - 其余节点（输入处理 / 规划 / 汇总 / 反馈 / 检测等）逐条展示，保留顺序
+ * 每块带稳定 key（首任务 id / 节点 id），保证流式追加时折叠状态不错位。 */
 const groups = computed(() => {
   const out = []
   let cur = null
   for (const it of props.items) {
     if (it.type === 'tool') {
-      if (!cur) { cur = { type: 'tool', items: [] }; out.push(cur) }
+      if (!cur) { cur = { type: 'tool', key: `tool:${it.id}`, items: [] }; out.push(cur) }
       cur.items.push(it)
     } else {
       cur = null
-      out.push({ type: 'node', item: it })
+      out.push({ type: 'node', key: `node:${it.id}`, item: it })
     }
   }
   return out
 })
+
+function isCombinedOpen(grp) {
+  return combinedState.value.has(grp.key)
+    ? combinedState.value.get(grp.key)
+    : props.expand
+}
+function toggleCombined(grp) {
+  const next = new Map(combinedState.value)
+  next.set(grp.key, !isCombinedOpen(grp))
+  combinedState.value = next
+}
 /* 任务块内容：只取该任务的"问题"与"结果（result）"，不展示 key_data / 状态等后台字段。
  * 问题优先从各轮 plan 步骤里按任务 id 反查（允许多轮规划、跨轮同名任务），
  * 不再显示"子任务执行 · 步骤 tN"这类标题。 */
@@ -115,7 +129,9 @@ function toggleStep(id) {
   openSteps.value = new Set(s)
 }
 function toggleAllSteps() {
-  openSteps.value = new Set(openSteps.value.size ? [] : props.items.map(p => p.id))
+  // 仅作用于普通过程节点，任务执行块由各自独立控制
+  const ids = props.items.filter(p => p.type !== 'tool').map(p => p.id)
+  openSteps.value = new Set(openSteps.value.size ? [] : ids)
 }
 
 function iconFor(item) {

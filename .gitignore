@@ -59,6 +59,9 @@ start.bat
 /api.py
 /main.py
 
+# 本地测试代码，不入库
+/tests/
+
 # ============ 敏感配置：显式声明，防止漏配导致泄露 ============
 # 后端密钥 / MCP 真实端点（含 API Key 的 mcp.json）
 /backend/.env

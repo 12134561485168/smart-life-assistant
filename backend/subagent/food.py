@@ -1,4 +1,3 @@
-import json
 import os
 from functools import lru_cache
 from typing import Annotated
@@ -11,10 +10,16 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph._internal._constants import CONFIG_KEY_CHECKPOINTER
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from model import chat_model
+from model import chat_subagent_model
+from subagent.common import (
+    ToolsCache,
+    collect_tool_evidence,
+    load_mcp_section,
+    load_tools_resilient,
+)
 from typing_extensions import TypedDict
 def load_md_file(file_name):
-    # 基于本文件位置定位 md 目录，避免依赖进程当前工作目录
+    # 基于本文件定位 md 目录，避免依赖工作目录
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "md", file_name)
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -25,48 +30,50 @@ def load_md_file(file_name):
 agents_guide = load_md_file("AGENTS.md")
 skill_guide = load_md_file("SKILL.md")
 
+class ModelOutput(TypedDict):
+    """模型必须输出的结构化字段。"""
+    result: str   # 面向用户的最终自然语言回复
+    key_data: dict  # 关键数据（如菜名、分类、食材、来源链接等结构化字段）
+    status: str   # 执行状态："success" / "partial" / "no_data" / "failed"
+
+
 class InputState(TypedDict):
     question: str
 
 
-class OutputState(TypedDict):
-    result: str   # 面向用户的最终自然语言回复
-    key_data: dict  # 关键数据（如菜名、分类、食材、来源链接等结构化字段）
-    status: str   # 执行状态："success" / "no_data" / "failed"
+class OutputState(ModelOutput):
+    evidence: list[dict]  # 真实工具响应片段（由代码采集，不由模型生成）
+    missing_slots: list[str]
+    retryable: bool
+    error_code: str
 
 
 class GraphState(InputState, OutputState):
     messages: Annotated[list, add_messages]
 
 
-# 基于本文件位置定位配置，避免依赖进程当前工作目录
-_MCP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mcp.json")
-with open(_MCP_PATH, "r", encoding="utf-8") as f:
-    config = json.load(f)['food']
+# 读取该子 Agent 的 MCP 配置
+config = load_mcp_section("food")
 
 
 @lru_cache(maxsize=1)
 def get_mcp_client() -> MultiServerMCPClient:
-    """获取缓存的 MCP 客户端，避免每次美食查询都重复握手建立连接。"""
+    """缓存的 MCP 客户端，避免重复握手。"""
     return MultiServerMCPClient(connections=config)
 
 
-# MCP 工具列表缓存：首次获取后复用，避免每次执行都重复握手
-_tools_cache = None
+_tools_cache = ToolsCache()
 
 
 async def _get_tools():
-    """获取（并缓存）已连接的 MCP 工具列表。"""
-    global _tools_cache
-    if _tools_cache is None:
-        _tools_cache = await get_mcp_client().get_tools()
-    return _tools_cache
+    """获取（并缓存）已连接的 MCP 工具列表（单个服务故障不影响其余）。"""
+    return await _tools_cache.get(lambda: load_tools_resilient(get_mcp_client(), config))
 
 
 async def food(state: GraphState):
     tools = await _get_tools()
     agent = create_agent(
-        chat_model(),
+        chat_subagent_model(),
         tools=tools,
         system_prompt=f"""
             你是一位专业且富有温度的智能助手——「万象」，你目前处于食物模块。你的核心职责是：精准理解用户意图，围绕食物、菜谱、饮食与营养健康，用自然、温暖、实用的语言直接回答用户问题，并妥善处理围绕饮食的日常寒暄。
@@ -104,25 +111,35 @@ async def food(state: GraphState):
             你最终必须以下列三个字段输出，缺一不可：
             - `result`：面向用户的完整自然语言回复（菜谱、建议或寒暄，即最终给用户看的正文）；当 status="no_data" 时，请用**一句简短、直接的话**告诉用户需要补充什么（如"请告诉我你想吃的菜品名称或可用的食材"），不要冗长铺垫。
             - `key_data`：将本次回答涉及的关键数据提炼为一组英文 snake_case 字段的可读对象（如 dish、category、cuisine、ingredients 清单、extra_source_url 等）；无相关数据时给空对象 {{}}。
-            - `status`：按数据可得性填枚举值 —— 检索到真实数据填 "success"；未获得有效数据但已礼貌向用户说明填 "no_data"；执行过程出错填 "failed"。
+            - `status`：按数据可得性填枚举值 —— 检索到真实数据填 "success"；仅获得部分数据填 "partial"；未获得有效数据但已礼貌向用户说明填 "no_data"；执行过程出错填 "failed"。
             """,
-        response_format=OutputState,
+        response_format=ModelOutput,
     )
-    response = await agent.ainvoke(
-        {"messages": state["messages"]},
-        # 显式关闭跨图 checkpointer 继承，防止嵌套 agent 误用主图的 Redis saver；
-        # 子图自身的独立内存 checkpoint 见 get_food_graph
-        {"configurable": {CONFIG_KEY_CHECKPOINTER: None}},
-    )
-    # 结构化输出（response_format）存入 state.structured_response；缺失时兜底构造。
-    # 把 {result, key_data, status} 展开到子图 OutputState 顶层字段，供主图直接消费。
+    try:
+        response = await agent.ainvoke(
+            {"messages": state["messages"]},
+            # 关闭跨图 checkpointer 继承，避免嵌套 agent 误用主图 saver
+            {"configurable": {CONFIG_KEY_CHECKPOINTER: None}},
+        )
+    except Exception:
+        # MCP 连接可能失效：清空缓存，下次重新握手
+        _tools_cache.invalidate()
+        raise
+    # 结构化输出缺失时兜底为空 dict
     sr = response.get("structured_response") or {}
     if not isinstance(sr, dict):
         sr = {}
+    status = str(sr.get("status", "failed"))
+    if status not in {"success", "partial", "no_data", "failed"}:
+        status = "success" if sr.get("result") else "failed"
     return {
         "result": str(sr.get("result", "")),
         "key_data": sr.get("key_data", {}) if isinstance(sr.get("key_data"), dict) else {},
-        "status": str(sr.get("status", "failed")),
+        "status": status,
+        "evidence": collect_tool_evidence(response.get("messages")),
+        "missing_slots": [],
+        "retryable": status == "failed",
+        "error_code": "" if status != "failed" else "subagent_failed",
     }
 
 def input(state: GraphState):
@@ -140,5 +157,5 @@ def get_food_graph():
     graph.add_edge("input", "food")
     graph.add_edge("food", END)
 
-    # 子图不配置 checkpointer：图状态只存在于单次调用内，不持久化、不依赖主图 saver
+    # 子图不配置 checkpointer：状态不持久化，不依赖主图 saver
     return graph.compile()
